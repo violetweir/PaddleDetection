@@ -27,6 +27,14 @@ from paddle.vision.ops import DeformConv2D
 from .name_adapter import NameAdapter
 from ..shape_spec import ShapeSpec
 
+import numpy as np
+# from paddle.nn import Conv2D, MaxPool2D, BatchNorm, Linear
+from paddle.nn import Conv2D, MaxPool2D, BatchNorm2D, Linear ,ReLU
+from einops import rearrange
+
+
+
+
 __all__ = ['ResNet', 'Res5Head', 'Blocks', 'BasicBlock', 'BottleNeck']
 
 ResNet_cfg = {
@@ -36,6 +44,65 @@ ResNet_cfg = {
     101: [3, 4, 23, 3],
     152: [3, 8, 36, 3],
 }
+
+
+def get_n_params(model):
+    pp=0
+    for p in list(model.parameters()):
+        nn=1
+        for s in list(p.size()):
+            nn = nn*s
+        pp += nn
+    return pp
+
+
+
+class MHSA(paddle.nn.Layer):
+    def __init__(self, n_dims, width=38, height=38, heads=4):
+        super(MHSA, self).__init__()
+        self.heads = heads
+
+        self.query = Conv2D(512, 512, kernel_size=1)
+        self.key = Conv2D(512, 512, kernel_size=1)
+        self.value = Conv2D(n_dims, n_dims, kernel_size=1)
+        self.create_parameter([1,1])
+        self.rel_h = self.create_parameter(shape=[1,heads,n_dims // heads,1,height],default_initializer=paddle.nn.initializer.Normal(std=1e-4),dtype='float32') 
+        self.add_parameter('rel_h',self.rel_h)
+        self.rel_w = self.create_parameter(shape=[1, heads, n_dims // heads, width, 1],default_initializer=paddle.nn.initializer.Normal(std=1e-4),dtype='float32')
+
+        self.add_parameter('rel_w',self.rel_w)
+
+    def forward(self, x):
+
+        n_batch, C, width, height = x.shape
+        q = self.query(x).reshape([n_batch, self.heads, C // self.heads, -1])
+        k = self.key(x).reshape([n_batch, self.heads, C // self.heads, -1])
+        v = self.value(x).reshape([n_batch, self.heads, C // self.heads, -1])
+        content_content = paddle.matmul(paddle.transpose(q,(0, 1, 3, 2)), k) 
+        content_position = paddle.transpose((self.rel_h + self.rel_w).reshape([1, self.heads, C // self.heads, -1]),[0, 1, 3, 2])
+        content_position = paddle.matmul(content_position, q)
+        
+        energy = content_content + content_position
+        attention = paddle.nn.functional.softmax(energy)
+        out = paddle.matmul(v, attention)
+        out = paddle.reshape(out,[n_batch, C, width, height])
+
+        return out
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 class ConvNormLayer(nn.Layer):
@@ -267,10 +334,12 @@ class BottleNeck(nn.Layer):
     expansion = 4
 
     def __init__(self,
-                 ch_in,
-                 ch_out,
-                 stride,
-                 shortcut,
+                 x,
+                 y,
+                 ch_in,    
+                 ch_out,       
+                 stride,       
+                 shortcut, 
                  variant='b',
                  groups=1,
                  base_width=4,
@@ -330,8 +399,16 @@ class BottleNeck(nn.Layer):
             norm_decay=norm_decay,
             freeze_norm=freeze_norm,
             lr=lr)
-
-        self.branch2b = ConvNormLayer(
+        
+        if x and y:
+            self.branch2b = paddle.nn.LayerList()
+            self.branch2b.append(MHSA(512, width=int(48), height=int(48), heads=4))
+            self.branch2b.append(paddle.nn.AvgPool2D(2, 2))
+            self.branch2b = paddle.nn.Sequential(*self.branch2b)
+        elif x and not y:
+            self.branch2b = MHSA(512,width=24, height=24)
+        else:    
+            self.branch2b = ConvNormLayer(
             ch_in=width,
             ch_out=width,
             filter_size=3,
@@ -382,6 +459,7 @@ class BottleNeck(nn.Layer):
 class Blocks(nn.Layer):
     def __init__(self,
                  block,
+                 x,
                  ch_in,
                  ch_out,
                  count,
@@ -400,10 +478,16 @@ class Blocks(nn.Layer):
 
         self.blocks = []
         for i in range(count):
+            if i == 0:
+                y = 1
+            else:
+                y = 0
             conv_name = name_adapter.fix_layer_warp_name(stage_num, count, i)
             layer = self.add_sublayer(
                 conv_name,
                 block(
+                    x,
+                    y,
                     ch_in=ch_in,
                     ch_out=ch_out,
                     stride=2 if i == 0 and stage_num != 2 else 1,
@@ -445,7 +529,7 @@ class ResNet(nn.Layer):
                  freeze_norm=True,
                  freeze_at=0,
                  return_idx=[0, 1, 2, 3],
-                 dcn_v2_stages=[-1],
+                 dcn_v2_stages=[-1],   
                  num_stages=4,
                  std_senet=False):
         """
@@ -501,7 +585,6 @@ class ResNet(nn.Layer):
 
         block_nums = ResNet_cfg[depth]
         na = NameAdapter(self)
-
         conv1_name = na.fix_c1_stage_name()
         if variant in ['c', 'd']:
             conv_def = [
@@ -536,6 +619,10 @@ class ResNet(nn.Layer):
 
         self.res_layers = []
         for i in range(num_stages):
+            if i == 3 :
+                x = 1
+            else :
+                x = 0
             lr_mult = lr_mult_list[i]
             stage_num = i + 2
             res_name = "res{}".format(stage_num)
@@ -543,6 +630,7 @@ class ResNet(nn.Layer):
                 res_name,
                 Blocks(
                     block,
+                    x,
                     self.ch_in,
                     ch_out_list[i],
                     count=block_nums[i],
