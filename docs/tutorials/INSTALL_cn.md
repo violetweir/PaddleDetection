@@ -94,6 +94,10 @@ pip install -r requirements.txt
 2. 若您使用的是Python <= 3.6的版本，安装`pycocotools`可能会报错`distutils.errors.DistutilsError: Could not find suitable distribution for Requirement.parse('cython>=0.27.3')`, 您可通过先安装`cython`如`pip install cython`解决该问题
 
 
+3. 若您使用Windows系统安装`pycocotools`可能会报错`Microsoft Visual C++ 14 is Required.`,这是因为您的电脑没有Visual C++ 编译环境，您可通过安装
+`Build Tools for Visual Studio` 或安装 `Visual Studio`来解决。
+
+
 安装后确认测试通过：
 
 ```
